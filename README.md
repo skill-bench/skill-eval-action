@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/skill-bench/skill-eval-action/main/logo.svg" alt="Skill Bench" width="200">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="skill-bench-logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="skill-bench-logo.png">
+    <img alt="Skill Bench" src="skill-bench-logo.png" width="200">
+  </picture>
 </p>
 
 <p align="center">

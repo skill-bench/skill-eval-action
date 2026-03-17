@@ -232,6 +232,20 @@ The action posts (or updates) a PR comment with:
 
 Comments are upserted using an HTML marker - re-runs update the existing comment instead of creating duplicates.
 
+## Non-determinism and flakiness
+
+LLM-based evals are non-deterministic. Each run, Claude generates a slightly different response, and the grader evaluates it slightly differently. The same skill without changes may produce different pass rates across runs.
+
+This is why:
+- The default `pass-threshold` is `80` not `100`
+- The [agentskills.io best practices](https://agentskills.io/skill-creation/evaluating-skills) say "occasional flakiness is expected"
+- Multiple runs + aggregation gives a more reliable picture
+
+Options to reduce flakiness:
+1. **Relax criteria** - make them less brittle (e.g., "uses SHA pinning or explains how to resolve SHAs" instead of "all actions pinned to 40-char SHA")
+2. **Run multiple times and average** - aggregate results across runs for a stable signal
+3. **Lower threshold** - accept that 70-80% is a realistic pass rate for LLM evals
+
 ## Cost considerations
 
 Each eval case makes **2 API calls** (execute + grade). A skill with 5 cases = 10 API calls. Set appropriate `timeout` values to limit runaway token usage. Use the "changed only" pattern to avoid evaluating unchanged skills on every PR.

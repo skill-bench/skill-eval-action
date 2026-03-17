@@ -20,16 +20,17 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           python-version: '3.13'
+          activate-environment: 'true'
 
       - name: Install tools
-        run: uv pip install ruff pyyaml zizmor --quiet
+        run: uv pip install ruff pyyaml zizmor
 
       - name: Lint Python scripts
-        run: uv run ruff check scripts/
+        run: ruff check scripts/
 
       - name: Validate action.yml
         run: |
-          uv run python -c "
+          python -c "
           import yaml, re
           with open('action.yml') as f:
               content = f.read()
@@ -42,4 +43,4 @@ jobs:
           "
 
       - name: Lint workflows with zizmor
-        run: uv run zizmor action.yml .github/workflows/*.yml
+        run: zizmor action.yml .github/workflows/*.yml

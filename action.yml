@@ -105,11 +105,19 @@ runs:
         SKILL_NAME: ${{ inputs.skill-name }}
         TEMPLATE_PATH: ${{ github.action_path }}/scripts/viewer.html
 
+    - name: Set artifact name with timestamp
+      if: inputs.upload-viewer == 'true'
+      id: artifact-name
+      shell: bash
+      run: echo "name=$(date -u '+%Y%m%dT%H%M%S')-$SKILL_NAME" >> "$GITHUB_OUTPUT"
+      env:
+        SKILL_NAME: ${{ inputs.skill-name }}
+
     - name: Upload eval viewer
       if: inputs.upload-viewer == 'true'
       uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
       with:
-        name: eval-viewer-${{ inputs.skill-name }}
+        name: ${{ steps.artifact-name.outputs.name }}
         path: ${{ runner.temp }}/skill-eval/${{ inputs.skill-name }}/viewer.html
         retention-days: 30
 

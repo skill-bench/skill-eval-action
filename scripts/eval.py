@@ -8,6 +8,7 @@ and sets GitHub Actions outputs.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,23 +33,160 @@ RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "10"))
 
 
 # ---------------------------------------------------------------------------
+# YAML helpers
+# ---------------------------------------------------------------------------
+
+def _safe_yaml_load(text: str, _max_fixes: int = 50) -> dict:
+    """Load YAML, auto-quoting plain scalar values that contain ': '.
+
+    YAML plain scalars cannot contain ': ' (colon-space).  This is a
+    constant source of errors for eval authors writing natural-language
+    criteria.  When PyYAML raises "mapping values are not allowed here"
+    we locate the offending line, wrap its value in double quotes, and
+    retry — up to ``_max_fixes`` times so that multiple lines in the
+    same file are handled in a single call.
+    """
+    lines = text.split("\n")
+    fixed_lines: set[int] = set()
+
+    for _ in range(_max_fixes):
+        try:
+            return yaml.safe_load("\n".join(lines))
+        except yaml.scanner.ScannerError as exc:
+            if (
+                exc.problem == "mapping values are not allowed here"
+                and exc.problem_mark is not None
+            ):
+                err_line = exc.problem_mark.line  # 0-indexed
+                if err_line in fixed_lines:
+                    raise  # already tried this line — bail out
+                line = lines[err_line]
+                m = re.match(r"^(\s+\w[\w_-]*):\s+(.+)$", line)
+                if m:
+                    value = m.group(2)
+                    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                    lines[err_line] = f'{m.group(1)}: "{escaped}"'
+                    fixed_lines.add(err_line)
+                    continue
+            raise
+
+    return yaml.safe_load("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 
 def discover_evals(skill_path: Path) -> list[dict]:
-    """Read all .yaml eval files from the skill's evals/ directory."""
+    """Read all .yaml/.yml eval files from the skill's evals/ directory."""
     evals_dir = skill_path / "evals"
     if not evals_dir.is_dir():
         return []
+    yaml_files = sorted(
+        list(evals_dir.glob("*.yaml")) + list(evals_dir.glob("*.yml")),
+        key=lambda p: p.name,
+    )
     cases = []
-    for yaml_file in sorted(evals_dir.glob("*.yaml")):
-        case = yaml.safe_load(yaml_file.read_text())
+    for yaml_file in yaml_files:
+        try:
+            case = _safe_yaml_load(yaml_file.read_text())
+        except yaml.YAMLError as exc:
+            print(
+                f"::error file={yaml_file}::Failed to parse eval YAML: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not isinstance(case, dict):
+            print(
+                f"::error file={yaml_file}::Eval YAML must be a mapping, got {type(case).__name__}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Normalize rubric format → flat criteria list
+        if "criteria" not in case and "grading" in case:
+            grading = case["grading"]
+            rubric = grading.get("rubric", []) if isinstance(grading, dict) else []
+            criteria = []
+            for entry in rubric:
+                if isinstance(entry, dict):
+                    desc = entry.get("description", "")
+                    pass_if = entry.get("pass_if", "")
+                    if pass_if:
+                        criteria.append(f"{desc} — PASS IF: {pass_if}")
+                    elif desc:
+                        criteria.append(desc)
+                elif isinstance(entry, str):
+                    criteria.append(entry)
+            case["criteria"] = criteria
+            # Preserve per-case pass threshold if specified
+            if isinstance(grading, dict) and "pass_threshold" in grading:
+                case.setdefault("case_pass_threshold", grading["pass_threshold"])
+
         case.setdefault("name", yaml_file.stem)
         case.setdefault("expect_skill", True)
         case.setdefault("timeout", EVAL_TIMEOUT)
         case["_source"] = str(yaml_file)
         cases.append(case)
     return cases
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def validate_cases(cases: list[dict]) -> list[str]:
+    """Validate eval cases and return a list of error strings (empty = OK)."""
+    errors: list[str] = []
+
+    for case in cases:
+        src = case.get("_source", "unknown")
+        name = case.get("name", "unnamed")
+        prefix = f"{src} ({name})"
+
+        # prompt — required, must be a non-empty string
+        prompt = case.get("prompt")
+        if prompt is None:
+            errors.append(f"{prefix}: missing required field 'prompt'")
+        elif not isinstance(prompt, str) or not prompt.strip():
+            errors.append(f"{prefix}: 'prompt' must be a non-empty string")
+
+        # criteria — required, list of strings
+        criteria = case.get("criteria")
+        if criteria is None:
+            errors.append(f"{prefix}: missing required field 'criteria' (list of strings)")
+        elif not isinstance(criteria, list) or len(criteria) == 0:
+            errors.append(f"{prefix}: 'criteria' must be a non-empty list")
+        else:
+            for i, c in enumerate(criteria):
+                if not isinstance(c, str):
+                    errors.append(
+                        f"{prefix}: criteria[{i}] must be a string, got {type(c).__name__}. "
+                        "If using a rubric structure, flatten to a list of plain strings."
+                    )
+
+        # files — optional, list of dicts with 'path'
+        files = case.get("files")
+        if files is not None:
+            if not isinstance(files, list):
+                errors.append(f"{prefix}: 'files' must be a list of {{path, content}} objects")
+            else:
+                for i, f in enumerate(files):
+                    if not isinstance(f, dict):
+                        errors.append(f"{prefix}: files[{i}] must be a mapping with 'path' key")
+                    elif "path" not in f:
+                        errors.append(f"{prefix}: files[{i}] missing required 'path' key")
+
+        # expect_skill — optional, bool
+        es = case.get("expect_skill")
+        if es is not None and not isinstance(es, bool):
+            errors.append(f"{prefix}: 'expect_skill' must be true or false, got {type(es).__name__}")
+
+        # timeout — optional, number
+        to = case.get("timeout")
+        if to is not None and not isinstance(to, (int, float)):
+            errors.append(f"{prefix}: 'timeout' must be a number, got {type(to).__name__}")
+
+    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -271,10 +409,18 @@ def main() -> None:
         print(f"::error::No eval YAML files in {SKILL_PATH / 'evals'}")
         sys.exit(1)
 
+    # Validate all cases before spending time/money on API calls
+    validation_errors = validate_cases(cases)
+    if validation_errors:
+        print(f"::error::Found {len(validation_errors)} validation error(s) in eval cases:")
+        for err in validation_errors:
+            print(f"  ::error::{err}", file=sys.stderr)
+        sys.exit(1)
+
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     skill_content = skill_md.read_text()
 
-    print(f"Evaluating: {SKILL_NAME} ({len(cases)} cases)")
+    print(f"Evaluating: {SKILL_NAME} ({len(cases)} cases, all validated)")
 
     # Execute
     exec_results = []
